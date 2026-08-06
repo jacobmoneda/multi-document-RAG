@@ -3,14 +3,20 @@ Extracts text, speaker notes, and table content from .pptx lecture files
 into a structured JSON format ready for chunking/embedding in a RAG pipeline.
 
 Usage:
-    python extract_pptx.py <input_folder> <output_json>
+    python extract_pptx.py <input_folder> <output_json> [--course COURSE]
 
 Example:
-    python extract_pptx.py data/raw/ data/extracted_slides.json
+    python extract_pptx.py data/raw/COMP719/ data/comp719_slides.json --course COMP719
+
+If --course is omitted, the course is inferred from the input folder's name
+(e.g. data/raw/COMP719/ -> "COMP719"). Filename-based inference was dropped
+since lecture filenames like "L1 - Introduction.pptx" don't reliably encode
+a course code -- organize slides into one folder per course instead.
 """
 
 import sys
 import json
+import argparse
 from pathlib import Path
 from pptx import Presentation
 
@@ -40,7 +46,7 @@ def extract_table_text(shape):
 def extract_slide(slide, slide_num, source_file, course):
     """Pull all text content + metadata from a single slide."""
     text_parts = []
-    has_image_only_content = False
+    has_images = False
 
     for shape in slide.shapes:
         if shape.has_text_frame:
@@ -50,7 +56,7 @@ def extract_slide(slide, slide_num, source_file, course):
         elif shape.has_table:
             text_parts.append(extract_table_text(shape))
         elif shape.shape_type == 13:  # MSO_SHAPE_TYPE.PICTURE
-            has_image_only_content = True
+            has_images = True
 
     slide_text = "\n".join(text_parts).strip()
 
@@ -66,16 +72,15 @@ def extract_slide(slide, slide_num, source_file, course):
         "source_file": source_file,
         "slide_number": slide_num,
         "course": course,
-        "chunk_id": f"{Path(source_file).stem}_s{slide_num}".lower().replace(" ", "_"),
-        "has_image_only_content": has_image_only_content,
+        "chunk_id": f"{Path(source_file).stem}_s{slide_num}".lower().replace(" ", "_").replace("-", "_"),
+        "has_images": has_images,
     }
 
 
-def extract_pptx_file(filepath, course=None):
+def extract_pptx_file(filepath, course):
     """Extract all slides from one .pptx file."""
     prs = Presentation(filepath)
     source_file = Path(filepath).name
-    course = course or Path(filepath).stem.split("_")[0]  # e.g. "COMP717" from "COMP717_Lecture4.pptx"
 
     slides_data = []
     for i, slide in enumerate(prs.slides, start=1):
@@ -87,8 +92,7 @@ def extract_pptx_file(filepath, course=None):
     return slides_data
 
 
-def extract_folder(folder_path, output_path):
-    """Walk a folder of .pptx files and dump all extracted slides to JSON."""
+def extract_folder(folder_path, output_path, course=None):
     folder = Path(folder_path)
     pptx_files = sorted(folder.glob("*.pptx"))
 
@@ -96,11 +100,15 @@ def extract_folder(folder_path, output_path):
         print(f"No .pptx files found in {folder_path}")
         return
 
+    # Fall back to the folder name if --course wasn't passed explicitly
+    resolved_course = course or folder.name
+    print(f"Using course label: {resolved_course}")
+
     all_slides = []
     for pptx_file in pptx_files:
         print(f"Extracting: {pptx_file.name}")
         try:
-            slides = extract_pptx_file(pptx_file)
+            slides = extract_pptx_file(pptx_file, course=resolved_course)
             all_slides.extend(slides)
             print(f"  -> {len(slides)} slides extracted")
         except Exception as e:
@@ -111,18 +119,20 @@ def extract_folder(folder_path, output_path):
 
     print(f"\nDone. {len(all_slides)} total slides written to {output_path}")
 
-    # Quick sanity flags worth checking manually
-    image_only = [s for s in all_slides if s["has_image_only_content"] and not s["text"]]
-    if image_only:
-        print(f"Note: {len(image_only)} slides have image-only content with no extracted text "
-              f"(diagrams/screenshots) — these won't be searchable by text retrieval yet.")
+    # Quick sanity flag worth checking manually: images present with NO text
+    # at all -- these slides are currently invisible to text retrieval.
+    invisible = [s for s in all_slides if s["has_images"] and not s["text"]]
+    if invisible:
+        print(f"Note: {len(invisible)} slide(s) have images but no extracted text "
+              f"(diagrams/screenshots) -- not searchable by text retrieval yet.")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python extract_pptx.py <input_folder> <output_json>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Extract text/notes/tables from .pptx lecture files.")
+    parser.add_argument("input_folder", help="Folder containing .pptx files")
+    parser.add_argument("output_json", help="Path to write extracted JSON")
+    parser.add_argument("--course", help="Course label to tag every slide with "
+                                          "(defaults to the input folder's name)")
+    args = parser.parse_args()
 
-    input_folder = sys.argv[1]
-    output_json = sys.argv[2]
-    extract_folder(input_folder, output_json)
+    extract_folder(args.input_folder, args.output_json, course=args.course)
